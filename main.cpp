@@ -4,7 +4,7 @@
 #include "parson.h"
 #include <MQTTClientMbedOs.h>
 
-#define BUFFER_LEN 256 // Payload length
+#define BUFFER_LEN 256             // Payload length
 #define ntpAddress "time.mikes.fi" // The VTT Mikes in Helsinki
 #define ntpPort 123
 
@@ -12,19 +12,20 @@
 SPI spi(D11, D12, D13); // mosi, miso, sclk
 DigitalOut tc1(D6);
 
-int rawLow = 0;
-int rawHigh = 0;
-int temperature = 0;
-int temperatureDigits = 0;
-int circuitTemperature = 0.0;
-int openCircuit = 0;
-int shortGND = 0;
-int shortVCC = 0;
+uint32_t rawLow = 0;
+uint32_t rawHigh = 0;
+uint32_t raw = 0;
+int16_t temperature = 0;
+int16_t temperatureDecimals = 0;
+int16_t circuitTemperature = 0;
+bool openCircuit = 0;
+bool shortGND = 0;
+bool shortVCC = 0;
 
-short tresholdMin = INT16_MAX;
-short tresholdMax = INT16_MAX;
-short criticalTresholdMin = INT16_MAX;
-short criticalTresholdMax = INT16_MAX;
+int16_t tresholdMin = INT16_MAX;
+int16_t tresholdMax = INT16_MAX;
+int16_t criticalTresholdMin = INT16_MAX;
+int16_t criticalTresholdMax = INT16_MAX;
 
 bool tempFault = 0;
 
@@ -38,7 +39,7 @@ void messageArrived(MQTT::MessageData &md) {
          md.topicName.lenstring.data);
 
   printf("Payload: %.*s\n", msg.payloadlen, (char *)msg.payload);
-  
+
   char buffer[256];
   int len = msg.payloadlen;
   if (len > 511)
@@ -69,33 +70,37 @@ void tresholdUpdateArrived(MQTTClient *client) {
   }
 }
 
-int getTemperature(int bits) {
-  // Negative temperature
-  if ((bits >> 15) % 2) {
-    // TODO
-    return -1;
+int16_t getSignedTemperature(uint32_t raw) {
+  int16_t tc14 = (raw >> 18) & 0x3FFF; // 0x3FFF = 0011 1111 1111 1111
+
+  // sign extend 14-bit
+  if (tc14 & 0x2000) // check sign bit
+  {
+    tc14 |= 0xC000; // set bits 15 and 14 for sign
   }
-  // Positive temperature
-  else {
-    return (bits >> 4);
-  }
+  return tc14;
 }
 
-int getTemperatureDigits(int bits) {
-    // Negative temperature
-    if ((bits >> 15) % 2) {
-      return 0;
-    }
-    // Positive temperature
-    else {
-      return ((bits >> 2) % 4) * 25;
-    }
+int16_t getSigned14bit(int16_t raw) {
+  int16_t tc14 = raw >> 2;
+
+  // check sign bit
+  if (tc14 & 0x2000) {
+    // set bits 15 and 14 for sign
+    tc14 |= 0xC000;
+  }
+
+  return tc14;
 }
 
-float getCircuitTemperature(int bits) {
-    // TODO
-    return -1;
-}
+int16_t getTempInt(int16_t tc14) { return tc14 >> 2; }
+
+int16_t getTempDec(int16_t tc14) { return (tc14 & 0x03) * 25; }
+// int16_t getTemperatureInteger(int16_t tc14) { return tc14 >> 2; }
+
+// int16_t getTemperatureDecimals(int16_t tc14) { return (tc14 & 0x03) * 25; }
+
+float getCircuitTemperature(int bits) { return bits >> 8; }
 
 int main() {
   // Temp sensor chip must be deselected
@@ -133,13 +138,17 @@ int main() {
 
   // NTP client
   NTPClient ntp(&esp);
-
   ntp.set_server(ntpAddress, ntpPort);
-  time_t timestamp = ntp.get_timestamp();
 
-  printf("\ntimestamp %u\n", timestamp);
+  int timestamp = -1;
+
+  while (timestamp < 0) {
+    printf("Getting time from NTP server...\n");
+    timestamp = ntp.get_timestamp();
+  }
+
+  printf("\ntimestamp %d\n", timestamp);
   set_time(timestamp);
-  // TODO: check that timestamp is ok (> 0), refetch if necessary
 
   // MQTT
   // Use with IP
@@ -180,6 +189,11 @@ int main() {
     rawHigh = spi.write(0x0000);
     rawLow = spi.write(0x0000);
 
+    raw = (rawHigh << 16) | rawLow;
+
+    printf("rawHigh: %X\n", rawHigh);
+    printf("rawLow: %X\n", rawLow);
+
     ThisThread::sleep_for(1ms);
 
     // Deselect
@@ -190,24 +204,30 @@ int main() {
     shortGND = (rawLow >> 1) % 2;
     shortVCC = (rawLow >> 2) % 2;
 
-    temperature = getTemperature(rawHigh);
-    temperatureDigits = getTemperatureDigits(rawHigh);
-    
+    int16_t tc14 = getSigned14bit(rawHigh);
+    temperature = getTempInt(tc14);
+    temperatureDecimals = getTempDec(tc14);
+
+    circuitTemperature = getCircuitTemperature(rawLow);
+
+    printf("Circuit temp: %d\n", circuitTemperature);
+    printf("openCircuit: %d\n", openCircuit);
+    printf("short GND: %d\n", shortGND);
+    printf("shortVCC = %d\n", shortVCC);
+
     sprintf(buffer,
-            "{\"time\": %d, \"temperature\": %d.%02d, \"tresholdMin\": %d, "
+            "{\"time\": %d, \"temperature\": %d.%d, \"tresholdMin\": %d, "
             "\"tresholdMax\": %d, \"criticalTresholdMin\": %d, "
             "\"criticalTresholdMax\": %d, \"tempFault\": %d}",
-            time(NULL), temperature, temperatureDigits, tresholdMin,
+            time(NULL), temperature, temperatureDecimals, tresholdMin,
             tresholdMax, criticalTresholdMin, criticalTresholdMax, tempFault);
-    
+
     msg.payloadlen = strlen(buffer);
-    printf("payload len %d", strlen(buffer));
+    printf("Sending...\n");
     client.publish(MBED_CONF_APP_MQTT_TOPIC, msg);
 
-    // client.yield(100);
     ThisThread::sleep_for(5s);
   }
-  // client.yield(100);
   printf("Disconnect client\n");
   client.disconnect();
 }

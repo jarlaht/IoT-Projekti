@@ -18,7 +18,7 @@
         },
         "mqtt-id": {
             "help": "MQTT Client id",
-            "value": "\"id4381312439288491932\""
+            "value": "\"idjarla43812331\""
         },
         "mqtt-broker-ip": {
             "help": "MQTT Broker host ip.",
