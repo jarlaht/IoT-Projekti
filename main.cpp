@@ -65,6 +65,7 @@ void messageArrived(MQTT::MessageData &md) {
 }
 
 void tresholdUpdateArrived(MQTTClient *client) {
+  client -> subscribe(MBED_CONF_APP_MQTT_UPDATE_TOPIC, MQTT::QOS0, messageArrived);
   while (true) {
     client->yield(100);
   }
@@ -178,7 +179,6 @@ int main() {
   socket.connect(MQTTBroker);
   client.connect(data);
 
-  client.subscribe(MBED_CONF_APP_MQTT_UPDATE_TOPIC, MQTT::QOS0, messageArrived);
   tresholdUpdate.start(callback(tresholdUpdateArrived, &client));
 
   while (true) {
